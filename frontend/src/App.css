@@ -285,6 +285,12 @@
   50% { opacity: 0.4; }
 }
 
+.status-dot.disconnected {
+  background: #444;
+  box-shadow: none;
+  animation: none;
+}
+
 /* ─── Tab Navigation ─────────────────────────────────────── */
 .tab-nav {
   display: flex;

@@ -53,7 +53,7 @@ const DEMO_PROMPTS = [
 
 // ─── Spreadsheet Preview Component ────────────────────────────────────────
 
-function SpreadsheetPreview({ pendingChanges, uploadedFile }) {
+function SpreadsheetPreview({ pendingChanges, workbookName }) {
   const pendingCells = pendingChanges.reduce((acc, c) => {
     acc[c.cell_address] = true;
     return acc;
@@ -80,7 +80,7 @@ function SpreadsheetPreview({ pendingChanges, uploadedFile }) {
     return classes.join(' ');
   }
 
-  const displayName = uploadedFile ? uploadedFile.name : 'LTV_CAC_Model_2024.xlsx';
+  const displayName = workbookName || 'LTV_CAC_Model_2024.xlsx';
 
   return (
     <div className="spreadsheet-area">
@@ -147,55 +147,78 @@ function SpreadsheetPreview({ pendingChanges, uploadedFile }) {
 
 // ─── Chat Tab Component ───────────────────────────────────────────────────
 
-function ChatTab({ sessionId, setSessionId, messages, setMessages, setPendingChanges, setActiveTab, uploadedFile, setUploadedFile }) {
+function ChatTab({ sessionId, setSessionId, messages, setMessages, setPendingChanges, setActiveTab, isWorkbookConnected, setIsWorkbookConnected, workbookName, setWorkbookName }) {
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
   const messagesEndRef = useRef(null);
-  const fileInputRef = useRef(null);
   const textareaRef = useRef(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
 
-  const handleFileUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setIsUploading(true);
-    setUploadedFile(file);
-
+  const handleConnectWorkbook = async () => {
+    setIsConnecting(true);
     try {
-      const formData = new FormData();
-      formData.append('file', file);
+      if (!window.Excel) {
+        throw new Error('Not running inside Excel');
+      }
+
+      let snapshot;
+      await window.Excel.run(async (context) => {
+        const sheets = context.workbook.worksheets;
+        sheets.load('items/name');
+        await context.sync();
+
+        snapshot = { sheets: [] };
+        for (const sheet of sheets.items) {
+          const usedRange = sheet.getUsedRange();
+          usedRange.load(['values', 'address']);
+          await context.sync();
+          snapshot.sheets.push({
+            name: sheet.name,
+            data: usedRange.values,
+          });
+        }
+      });
+
+      let wbName = 'Active Workbook';
+      try {
+        const url = window.Office.context.document.url;
+        if (url) wbName = url.split('/').pop().split('\\').pop() || 'Active Workbook';
+      } catch {}
 
       const res = await fetch(`${API_BASE}/api/upload`, {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(snapshot),
       });
 
       if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
       const data = await res.json();
       setSessionId(data.session_id);
+      setIsWorkbookConnected(true);
+      setWorkbookName(wbName);
 
       setMessages(prev => [...prev, {
         id: Date.now(),
         role: 'ai',
-        text: `✓ Uploaded "${file.name}" successfully. I can see your spreadsheet data. What would you like to analyze or update?`,
+        text: `✓ Connected to "${wbName}" successfully. I can see your spreadsheet data. What would you like to analyze or update?`,
         timestamp: new Date(),
       }]);
     } catch (err) {
       setMessages(prev => [...prev, {
         id: Date.now(),
         role: 'ai',
-        text: `Could not connect to the backend (${err.message}). Running in demo mode — your changes will be simulated locally.`,
+        text: `Could not connect to the Excel workbook (${err.message}). Running in demo mode — your changes will be simulated locally.`,
         timestamp: new Date(),
       }]);
-      // Demo mode: generate a fake session id
       setSessionId('demo-' + Date.now());
+      setIsWorkbookConnected(true);
+      setWorkbookName('Demo Workbook');
     } finally {
-      setIsUploading(false);
+      setIsConnecting(false);
     }
   };
 
@@ -265,40 +288,29 @@ function ChatTab({ sessionId, setSessionId, messages, setMessages, setPendingCha
     textareaRef.current?.focus();
   };
 
-  const fileLabel = uploadedFile
-    ? uploadedFile.name
-    : 'Upload Spreadsheet — Excel (.xlsx, .xls) or Google Sheets';
-
   return (
     <div className="chat-tab">
-      {/* File upload */}
+      {/* Connect to Workbook */}
       <div className="file-upload-zone">
         <button
-          className={`file-upload-btn ${uploadedFile ? 'has-file' : ''}`}
-          onClick={() => fileInputRef.current?.click()}
-          disabled={isUploading}
+          className={`file-upload-btn ${isWorkbookConnected ? 'has-file' : ''}`}
+          onClick={handleConnectWorkbook}
+          disabled={isConnecting}
         >
           <span className="upload-icon">
-            {isUploading ? '⟳' : uploadedFile ? '✓' : '↑'}
+            {isConnecting ? '⟳' : isWorkbookConnected ? '✓' : '⊞'}
           </span>
           <span className="file-upload-text">
-            {uploadedFile ? (
+            {isWorkbookConnected ? (
               <>
-                <span className="file-name">{uploadedFile.name}</span>
-                <span className="file-hint">Click to replace file</span>
+                <span className="file-name">{workbookName || 'Active Workbook'}</span>
+                <span className="file-hint">Click to reconnect</span>
               </>
             ) : (
-              <span>{isUploading ? 'Uploading...' : fileLabel}</span>
+              <span>{isConnecting ? 'Connecting...' : 'Connect to Workbook'}</span>
             )}
           </span>
         </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".xlsx,.xls,.csv"
-          style={{ display: 'none' }}
-          onChange={handleFileUpload}
-        />
       </div>
 
       {/* Chat messages */}
@@ -377,6 +389,20 @@ function ChatTab({ sessionId, setSessionId, messages, setMessages, setPendingCha
 function ChangesTab({ sessionId, pendingChanges, setPendingChanges }) {
 
   const acceptChange = async (change) => {
+    // Write value to Excel cell in real time
+    if (window.Excel) {
+      try {
+        await window.Excel.run(async (context) => {
+          const sheetName = change.sheet || 'Sheet1';
+          const sheet = context.workbook.worksheets.getItem(sheetName);
+          const range = sheet.getRange(change.cell_address);
+          range.values = [[change.new_value]];
+          await context.sync();
+        });
+      } catch {
+        // Not in Excel context — continue silently
+      }
+    }
     try {
       await fetch(`${API_BASE}/api/accept`, {
         method: 'POST',
@@ -403,6 +429,22 @@ function ChangesTab({ sessionId, pendingChanges, setPendingChanges }) {
   };
 
   const acceptAll = async () => {
+    // Write all values to Excel in a single run for efficiency
+    if (window.Excel) {
+      try {
+        await window.Excel.run(async (context) => {
+          for (const c of pendingChanges) {
+            const sheetName = c.sheet || 'Sheet1';
+            const sheet = context.workbook.worksheets.getItem(sheetName);
+            const range = sheet.getRange(c.cell_address);
+            range.values = [[c.new_value]];
+          }
+          await context.sync();
+        });
+      } catch {
+        // Not in Excel context — continue silently
+      }
+    }
     for (const c of pendingChanges) {
       try {
         await fetch(`${API_BASE}/api/accept`, {
@@ -543,7 +585,7 @@ function getDemoResponse(message) {
 
 // ─── Panel Header ─────────────────────────────────────────────────────────
 
-function PanelHeader({ sessionId }) {
+function PanelHeader({ sessionId, isWorkbookConnected }) {
   return (
     <div className="panel-header">
       <div className="panel-logo">
@@ -551,7 +593,7 @@ function PanelHeader({ sessionId }) {
         <span className="logo-text">4<span>sight</span></span>
       </div>
       <div className="panel-status">
-        <div className="status-dot" />
+        <div className={`status-dot${isWorkbookConnected ? '' : ' disconnected'}`} />
         {sessionId ? 'SESSION ACTIVE' : 'READY'}
       </div>
     </div>
@@ -594,7 +636,8 @@ function App() {
   const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([WELCOME_MESSAGE]);
   const [pendingChanges, setPendingChanges] = useState([]);
-  const [uploadedFile, setUploadedFile] = useState(null);
+  const [isWorkbookConnected, setIsWorkbookConnected] = useState(false);
+  const [workbookName, setWorkbookName] = useState(null);
 
   const renderTab = () => {
     switch (activeTab) {
@@ -608,8 +651,10 @@ function App() {
             pendingChanges={pendingChanges}
             setPendingChanges={setPendingChanges}
             setActiveTab={setActiveTab}
-            uploadedFile={uploadedFile}
-            setUploadedFile={setUploadedFile}
+            isWorkbookConnected={isWorkbookConnected}
+            setIsWorkbookConnected={setIsWorkbookConnected}
+            workbookName={workbookName}
+            setWorkbookName={setWorkbookName}
           />
         );
       case 'changes':
@@ -651,9 +696,9 @@ function App() {
 
   return (
     <div className="app">
-      <SpreadsheetPreview pendingChanges={pendingChanges} uploadedFile={uploadedFile} />
+      <SpreadsheetPreview pendingChanges={pendingChanges} workbookName={workbookName} />
       <div className="panel">
-        <PanelHeader sessionId={sessionId} />
+        <PanelHeader sessionId={sessionId} isWorkbookConnected={isWorkbookConnected} />
         <TabNav
           activeTab={activeTab}
           setActiveTab={setActiveTab}
